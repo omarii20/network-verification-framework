@@ -1,0 +1,22 @@
+# Compiled files
+build/
+bin/
+*.o
+*.out
+
+# Logs and reports
+logs/
+reports/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Operating system
+.DS_Store
