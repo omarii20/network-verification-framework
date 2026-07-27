@@ -69,44 +69,43 @@ int main(void)
         printf("Listening socket FD: %d\n", sockfd);
         printf("Client socket FD: %d\n", client_fd);
 
-        // Receive data from the client
-        char buffer[1024];
-        ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+        while (1){
 
-        if (bytes_received == -1){
-            perror("recv");
-            close(client_fd);
-            continue;
-        }
+            // Receive data from the client
+            char buffer[1024];
+            ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
-        if (bytes_received == 0){
-            printf("Client disconnected without sending data\n");
-            close(client_fd);
-            continue;
-        }
+            if (bytes_received == -1){
+                perror("send");
+                break;
+            }
 
-        buffer[bytes_received] = '\0';
+            if (bytes_received == 0){
+                printf("Client disconnected, FD %d\n", client_fd);
+                break;
+            }
 
-        printf("Received %zd bytes\n", bytes_received);
-        printf("Message: %s\n", buffer);
+            buffer[bytes_received] = '\0';
 
-        // Send a response back to the client
-        const char *response = "Message received successfully\n";
-        size_t response_length = strlen(response);
+            printf("Received %zd bytes\n", bytes_received);
+            printf("Message: %s\n", buffer);
 
-        ssize_t bytes_sent = send(client_fd, response, response_length, 0);
+            // Send a response back to the client
+            const char *response = "Message received successfully\n";
+            size_t response_length = strlen(response);
 
-        if (bytes_sent == -1){
-            perror("send");
-        }else
-        {
-            printf("Sent %zd bytes to client\n", bytes_sent);
+            ssize_t bytes_sent = send(client_fd, response, response_length, 0);
 
-            if ((size_t)bytes_sent < response_length){
-                printf("Warning: only part of the response was sent\n");
+            if (bytes_sent == -1){
+                perror("send");
+            }else{
+                printf("Sent %zd bytes to client\n", bytes_sent);
+
+                if ((size_t)bytes_sent < response_length){
+                    printf("Warning: only part of the response was sent\n");
+                }
             }
         }
-
         close(client_fd);
     }
 
