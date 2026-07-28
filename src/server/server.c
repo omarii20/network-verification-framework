@@ -3,14 +3,63 @@
 #include <unistd.h>
 #include <string.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <stdlib.h>
 
-int main(void)
-{
+
+void *handle_client(void *arg){
+    
+    int client_fd = *(int *)arg;
+    free(arg);
+
+    printf("Thread started for client FD %d\n", client_fd);
+
+    while (1){
+        char buffer[1024];
+
+        ssize_t bytes_received = recv( client_fd, buffer, sizeof(buffer) - 1, 0);
+
+        if (bytes_received == -1){
+            perror("recv");
+            break;
+        }
+
+        if (bytes_received == 0){
+            printf("Client disconnected, FD %d\n", client_fd);
+            break;
+        }
+
+        buffer[bytes_received] = '\0';
+
+        printf("Received %zd bytes from FD %d\n", bytes_received, client_fd);
+        printf("Message from FD %d: %s", client_fd, buffer);
+
+        const char *response = "Message received successfully\n";
+        size_t response_length = strlen(response);
+
+        ssize_t bytes_sent = send( client_fd, response, response_length, 0);
+
+        if (bytes_sent == -1){
+            perror("send");
+            break;
+        }
+
+        printf("Sent %zd bytes to client FD %d\n", bytes_sent, client_fd);
+    }
+
+    close(client_fd);
+
+    printf("Closed client socket FD %d\n", client_fd);
+
+    return NULL;
+}
+
+int main(void){
+
     // Create a TCP socket
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
-    if (sockfd == -1)
-    {
+    if (sockfd == -1){
         perror("socket");
         return 1;
     }
@@ -69,45 +118,33 @@ int main(void)
         printf("Listening socket FD: %d\n", sockfd);
         printf("Client socket FD: %d\n", client_fd);
 
-        while (1){
+        int *client_fd_ptr = malloc(sizeof(int));
 
-            // Receive data from the client
-            char buffer[1024];
-            ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-
-            if (bytes_received == -1){
-                perror("send");
-                break;
-            }
-
-            if (bytes_received == 0){
-                printf("Client disconnected, FD %d\n", client_fd);
-                break;
-            }
-
-            buffer[bytes_received] = '\0';
-
-            printf("Received %zd bytes\n", bytes_received);
-            printf("Message: %s\n", buffer);
-
-            // Send a response back to the client
-            const char *response = "Message received successfully\n";
-            size_t response_length = strlen(response);
-
-            ssize_t bytes_sent = send(client_fd, response, response_length, 0);
-
-            if (bytes_sent == -1){
-                perror("send");
-            }else{
-                printf("Sent %zd bytes to client\n", bytes_sent);
-
-                if ((size_t)bytes_sent < response_length){
-                    printf("Warning: only part of the response was sent\n");
-                }
-            }
+        if (client_fd_ptr == NULL){
+            perror("malloc");
+            close(client_fd);
+            continue;
         }
-        close(client_fd);
-    }
+
+        *client_fd_ptr = client_fd;
+        pthread_t thread_id;
+
+        int result = pthread_create(&thread_id, NULL, handle_client, client_fd_ptr);
+
+        if (result != 0){
+            fprintf(stderr, "pthread create failed: %s\n", strerror(result));
+
+            free(client_fd_ptr);
+            close(client_fd);
+            continue;
+        }
+
+        result = pthread_detach(thread_id);
+
+        if (result != 0){
+            fprintf(stderr, "pthread_detach failed: %s\n", strerror(result));
+        }
+    }    
 
     return 0;
 }
