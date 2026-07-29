@@ -3,56 +3,95 @@
 #include <unistd.h>
 #include <string.h>
 #include <netinet/in.h>
-#include <pthread.h>
 #include <stdlib.h>
+#include <poll.h>
+#include <errno.h>
 
+#define PORT 8080
+#define MAX_CLIENTS 100
+#define BUFFER_SIZE 1024
 
-void *handle_client(void *arg){
+/*
+ * מטפלת באירוע קריאה אחד של Client.
+ *
+ * מחזירה:
+ *  0  -> ה-Client עדיין מחובר
+ * -1  -> צריך לסגור ולהסיר את ה-Client
+ */
+
+int handle_client_event(int client_fd){
     
-    int client_fd = *(int *)arg;
-    free(arg);
+    char buffer[BUFFER_SIZE];
 
-    printf("Thread started for client FD %d\n", client_fd);
+    ssize_t bytes_received = recv( client_fd, buffer, sizeof(buffer) - 1, 0);
 
-    while (1){
-        char buffer[1024];
-
-        ssize_t bytes_received = recv( client_fd, buffer, sizeof(buffer) - 1, 0);
-
-        if (bytes_received == -1){
-            perror("recv");
-            break;
-        }
-
-        if (bytes_received == 0){
-            printf("Client disconnected, FD %d\n", client_fd);
-            break;
-        }
-
-        buffer[bytes_received] = '\0';
-
-        printf("Received %zd bytes from FD %d\n", bytes_received, client_fd);
-        printf("Message from FD %d: %s", client_fd, buffer);
-
-        const char *response = "Message received successfully\n";
-        size_t response_length = strlen(response);
-
-        ssize_t bytes_sent = send( client_fd, response, response_length, 0);
-
-        if (bytes_sent == -1){
-            perror("send");
-            break;
-        }
-
-        printf("Sent %zd bytes to client FD %d\n", bytes_sent, client_fd);
+    if (bytes_received == -1){
+        perror("recv");
+        return -1;
     }
 
-    close(client_fd);
+    if (bytes_received == 0){
+        printf("Client disconnected, FD %d\n", client_fd);
+        return -1;
+    }
 
-    printf("Closed client socket FD %d\n", client_fd);
+    buffer[bytes_received] = '\0';
 
-    return NULL;
+    printf("Received %zd bytes from FD %d\n", bytes_received, client_fd);
+    printf("Message from FD %d: %s", client_fd, buffer);
+
+    const char *response = "Message received successfully\n";
+    size_t response_length = strlen(response);
+
+    ssize_t bytes_sent = send( client_fd, response, response_length, 0);
+
+    if (bytes_sent == -1){
+        perror("send");
+        return -1;
+    }
+
+    printf("Sent %zd bytes to client FD %d\n", bytes_sent, client_fd);
+
+    return 0;
 }
+
+/*
+ * מוסיפה Client חדש למערך של poll.
+ *
+ * מחזירה:
+ *  0  -> הצלחה
+ * -1  -> אין מקום במערך
+ */
+
+ int add_client(struct pollfd poll_fds[], nfds_t *nfds, int client_fd){
+    if (*nfds >= MAX_CLIENTS + 1){
+        fprintf(stderr, "Max clients reached, cannot add new client FD %d\n", client_fd);
+        return -1;
+    }
+
+    poll_fds[*nfds].fd = client_fd;
+    poll_fds[*nfds].events = POLLIN;
+     poll_fds[*nfds].revents = 0;
+    (*nfds)++;
+
+    printf("Added client FD %d to poll array, total clients: %zu\n", client_fd, (size_t)*nfds);
+
+    return 0;
+ }
+
+ /*
+ * סוגרת ומסירה Client ממערך poll.
+ *
+ * אנחנו מעבירים את האיבר האחרון למקום של האיבר שנמחק.
+ */
+
+ void remove_client(struct pollfd poll_fds[], nfds_t *nfds, nfds_t index){
+    int client_fd = poll_fds[index].fd;
+    close(client_fd);
+    printf("Closed client FD %d\n", client_fd);
+    poll_fds[index] = poll_fds[*nfds - 1];
+    (*nfds)--;
+ }
 
 int main(void){
 
@@ -83,13 +122,14 @@ int main(void){
     server_addr.sin_port = htons(8080);
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
+    // חיבור ה-socket לפורט.
     if (bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1){
         perror("bind");
         close(sockfd);
         return 1;
     }
 
-    printf("Socket bound successfully to port 8080\n");
+    printf("Socket bound successfully to port %d\n", PORT);
 
     // Listen for incoming connections
     if (listen(sockfd, 5) == -1){
@@ -98,53 +138,121 @@ int main(void){
         return 1;
     }
 
-    printf("Server is listening on port 8080\n");
+    printf("Server is listening on port %d\n", PORT);
 
-    while (1){
-        // Accept an incoming connection
-        struct sockaddr_in client_addr;
-        socklen_t client_addr_len = sizeof(client_addr);
+    /*
+     * מערך ה-poll.
+     * מקום אחד ל-listening socket
+     * ועוד MAX_CLIENTS מקומות ל-Clients.
+    */
+    struct pollfd poll_fds[MAX_CLIENTS + 1];
 
-        printf("Waiting for incoming connections...\n");
+    /*
+     * בהתחלה יש FD תקף אחד בלבד:
+     * ה-listening socket.
+    */
+    nfds_t nfds = 1;
 
-        int client_fd = accept(sockfd, (struct sockaddr *)&client_addr, &client_addr_len);
+    poll_fds[0].fd = sockfd;
+    poll_fds[0].events = POLLIN;
+    poll_fds[0].revents = 0;
 
-        if (client_fd == -1){
-            perror("accept");
-            continue;
+    /*
+     * זוהי הלולאה הראשית של השרת.
+     * אין יותר Thread לכל Client.
+    */
+
+   while (1) {
+        printf("Waiting for events...\n");
+
+        int ready_count = poll(poll_fds, nfds, -1);
+
+        if (ready_count == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            perror("poll");
+            break;
         }
 
-        printf("Client connected successfully, FD %d\n", client_fd);
-        printf("Listening socket FD: %d\n", sockfd);
-        printf("Client socket FD: %d\n", client_fd);
+        /*
+         * בודקים את ה-listening socket.
+         *
+         * אם יש עליו POLLIN, יש Client חדש שמחכה ל-accept.
+         */
+        if (poll_fds[0].revents & POLLIN) {
+            struct sockaddr_in client_addr;
+            socklen_t client_addr_len = sizeof(client_addr);
 
-        int *client_fd_ptr = malloc(sizeof(int));
+            int client_fd = accept(sockfd, (struct sockaddr *)&client_addr, &client_addr_len);
 
-        if (client_fd_ptr == NULL){
-            perror("malloc");
-            close(client_fd);
-            continue;
+            if (client_fd == -1) {
+                perror("accept");
+            } else {
+                printf("Client connected successfully, FD %d\n", client_fd);
+
+                if (add_client(poll_fds, &nfds, client_fd) == -1){
+                    close(client_fd);
+                }
+            }
+
+            ready_count--;
         }
 
-        *client_fd_ptr = client_fd;
-        pthread_t thread_id;
+        /*
+         * מעבר על כל ה-Clients.
+         *
+         * מתחילים מ-1 כי index 0 הוא listening socket.
+         */
+        for (nfds_t i = 1; i < nfds && ready_count > 0; i++) {
+            short revents = poll_fds[i].revents;
 
-        int result = pthread_create(&thread_id, NULL, handle_client, client_fd_ptr);
+            if (revents == 0) {
+                continue;
+            }
 
-        if (result != 0){
-            fprintf(stderr, "pthread create failed: %s\n", strerror(result));
+            ready_count--;
 
-            free(client_fd_ptr);
-            close(client_fd);
-            continue;
+            /*
+             * אם יש מידע לקריאה.
+             */
+            if (revents & POLLIN) {
+                int result = handle_client_event( poll_fds[i].fd);
+
+                if (result == -1) {
+                    remove_client(
+                        poll_fds,
+                        &nfds,
+                        i
+                    );
+
+                    /*
+                     * העברנו את האיבר האחרון למקום i.
+                     * צריך לבדוק שוב את אותו index.
+                     */
+                    i--;
+                    continue;
+                }
+            }
+
+            /*
+             * טיפול בניתוק או בשגיאה.
+             */
+            if (revents & (POLLHUP | POLLERR | POLLNVAL)) {
+                printf("Socket event on FD %d, revents=%d\n", poll_fds[i].fd, revents);
+                remove_client(poll_fds, &nfds, i);
+                i--;
+            }
         }
+    }
 
-        result = pthread_detach(thread_id);
+    /*
+     * סגירת כל ה-FDs לפני סיום השרת.
+     */
+    for (nfds_t i = 0; i < nfds; i++) {
+        close(poll_fds[i].fd);
+    }
 
-        if (result != 0){
-            fprintf(stderr, "pthread_detach failed: %s\n", strerror(result));
-        }
-    }    
-
-    return 0;
+    return EXIT_SUCCESS;
 }
