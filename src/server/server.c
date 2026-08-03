@@ -71,10 +71,10 @@ int handle_client_event(int client_fd){
 
     poll_fds[*nfds].fd = client_fd;
     poll_fds[*nfds].events = POLLIN;
-     poll_fds[*nfds].revents = 0;
+    poll_fds[*nfds].revents = 0;
     (*nfds)++;
 
-    printf("Added client FD %d to poll array, total clients: %zu\n", client_fd, (size_t)*nfds);
+    printf("Added client FD %d to poll array, total clients: %zu\n", client_fd, (size_t)(*nfds - 1));
 
     return 0;
  }
@@ -119,7 +119,7 @@ int main(void){
     memset(&server_addr, 0, sizeof(server_addr));
 
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(8080);
+    server_addr.sin_port = htons(PORT);
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     // חיבור ה-socket לפורט.
@@ -221,11 +221,7 @@ int main(void){
                 int result = handle_client_event( poll_fds[i].fd);
 
                 if (result == -1) {
-                    remove_client(
-                        poll_fds,
-                        &nfds,
-                        i
-                    );
+                    remove_client(poll_fds, &nfds, i);
 
                     /*
                      * העברנו את האיבר האחרון למקום i.
