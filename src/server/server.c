@@ -4,11 +4,11 @@
 #include <string.h>
 #include <netinet/in.h>
 #include <stdlib.h>
-#include <poll.h>
 #include <errno.h>
+#include <sys/epoll.h>
 
 #define PORT 8080
-#define MAX_CLIENTS 100
+#define MAX_EVENTS 100
 #define BUFFER_SIZE 1024
 
 /*
@@ -56,41 +56,32 @@ int handle_client_event(int client_fd){
 }
 
 /*
- * מוסיפה Client חדש למערך של poll.
- *
- * מחזירה:
- *  0  -> הצלחה
- * -1  -> אין מקום במערך
- */
+ * Adds a client socket to the epoll instance.
+*/
+ int add_client(int epoll_fd, int client_fd){
+    struct epoll_event event;
+    event.events = EPOLLIN;
+    event.data.fd = client_fd;
 
- int add_client(struct pollfd poll_fds[], nfds_t *nfds, int client_fd){
-    if (*nfds >= MAX_CLIENTS + 1){
-        fprintf(stderr, "Max clients reached, cannot add new client FD %d\n", client_fd);
+    if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1){
+        perror("epoll_ctl: add_client");
         return -1;
     }
-
-    poll_fds[*nfds].fd = client_fd;
-    poll_fds[*nfds].events = POLLIN;
-    poll_fds[*nfds].revents = 0;
-    (*nfds)++;
-
-    printf("Added client FD %d to poll array, total clients: %zu\n", client_fd, (size_t)(*nfds - 1));
+    printf("Added client FD %d to epoll\n", client_fd);
 
     return 0;
  }
 
- /*
- * סוגרת ומסירה Client ממערך poll.
- *
- * אנחנו מעבירים את האיבר האחרון למקום של האיבר שנמחק.
- */
-
- void remove_client(struct pollfd poll_fds[], nfds_t *nfds, nfds_t index){
-    int client_fd = poll_fds[index].fd;
+/*
+ * Removes a client socket from the epoll instance
+ * and closes the socket.
+*/
+ void remove_client(int epoll_fd, int client_fd){
+    if(epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL) == -1){
+        perror("epoll_ctl: delete_client");
+    }
     close(client_fd);
-    printf("Closed client FD %d\n", client_fd);
-    poll_fds[index] = poll_fds[*nfds - 1];
-    (*nfds)--;
+    printf("Removed client FD %d from epoll and closed socket\n", client_fd);
  }
 
 int main(void){
@@ -140,115 +131,81 @@ int main(void){
 
     printf("Server is listening on port %d\n", PORT);
 
-    /*
-     * מערך ה-poll.
-     * מקום אחד ל-listening socket
-     * ועוד MAX_CLIENTS מקומות ל-Clients.
-    */
-    struct pollfd poll_fds[MAX_CLIENTS + 1];
+    // Create an epoll instance
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd == -1) {
+        perror("epoll_create1");
+        close(sockfd);
+        return 1;
+    }
 
-    /*
-     * בהתחלה יש FD תקף אחד בלבד:
-     * ה-listening socket.
-    */
-    nfds_t nfds = 1;
+    // Add the listening socket to the epoll instance
+    struct epoll_event event;
+    event.events = EPOLLIN;
+    event.data.fd = sockfd;
 
-    poll_fds[0].fd = sockfd;
-    poll_fds[0].events = POLLIN;
-    poll_fds[0].revents = 0;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sockfd, &event) == -1) {
+        perror("epoll_ctl ADD listen socket");
+        close(sockfd);
+        close(epoll_fd);
+        return 1;
+    }
 
-    /*
-     * זוהי הלולאה הראשית של השרת.
-     * אין יותר Thread לכל Client.
-    */
+    // Main event loop
+    struct epoll_event events[MAX_EVENTS];
 
-   while (1) {
+    while (1) {
         printf("Waiting for events...\n");
 
-        int ready_count = poll(poll_fds, nfds, -1);
-
+        int ready_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        
         if (ready_count == -1) {
             if (errno == EINTR) {
-                continue;
+                continue; // Interrupted by signal, retry
             }
-
-            perror("poll");
+            perror("epoll_wait");
             break;
         }
+        
+        for (int i = 0; i < ready_count; i++) {
+            int current_fd = events[i].data.fd;
 
-        /*
-         * בודקים את ה-listening socket.
-         *
-         * אם יש עליו POLLIN, יש Client חדש שמחכה ל-accept.
-         */
-        if (poll_fds[0].revents & POLLIN) {
-            struct sockaddr_in client_addr;
-            socklen_t client_addr_len = sizeof(client_addr);
+            if (current_fd == sockfd) {
+                struct sockaddr_in client_addr;
+                socklen_t client_addr_len = sizeof(client_addr);
 
-            int client_fd = accept(sockfd, (struct sockaddr *)&client_addr, &client_addr_len);
+                int client_fd = accept(sockfd, (struct sockaddr *)&client_addr, &client_addr_len);
 
-            if (client_fd == -1) {
-                perror("accept");
-            } else {
-                printf("Client connected successfully, FD %d\n", client_fd);
+                if (client_fd == -1) {
+                    perror("accept");
+                } else {
+                    printf("Client connected successfully, FD %d\n", client_fd);
 
-                if (add_client(poll_fds, &nfds, client_fd) == -1){
-                    close(client_fd);
+                    if (add_client(epoll_fd, client_fd) == -1) {
+                        close(client_fd);
+                    }
                 }
-            }
 
-            ready_count--;
-        }
-
-        /*
-         * מעבר על כל ה-Clients.
-         *
-         * מתחילים מ-1 כי index 0 הוא listening socket.
-         */
-        for (nfds_t i = 1; i < nfds && ready_count > 0; i++) {
-            short revents = poll_fds[i].revents;
-
-            if (revents == 0) {
-                continue;
-            }
-
-            ready_count--;
-
-            /*
-             * אם יש מידע לקריאה.
-             */
-            if (revents & POLLIN) {
-                int result = handle_client_event( poll_fds[i].fd);
-
-                if (result == -1) {
-                    remove_client(poll_fds, &nfds, i);
-
-                    /*
-                     * העברנו את האיבר האחרון למקום i.
-                     * צריך לבדוק שוב את אותו index.
-                     */
-                    i--;
+            } else {
+                if (events[i].events & (EPOLLERR | EPOLLHUP)) {
+                    printf("Socket error/hangup on FD %d\n", current_fd);
+                    remove_client(epoll_fd, current_fd);
                     continue;
                 }
-            }
 
-            /*
-             * טיפול בניתוק או בשגיאה.
-             */
-            if (revents & (POLLHUP | POLLERR | POLLNVAL)) {
-                printf("Socket event on FD %d, revents=%d\n", poll_fds[i].fd, revents);
-                remove_client(poll_fds, &nfds, i);
-                i--;
+                if (events[i].events & EPOLLIN) {
+                    int result = handle_client_event(current_fd);
+
+                    if (result == -1) {
+                        remove_client(epoll_fd, current_fd);
+                    }
+                }
             }
         }
     }
 
-    /*
-     * סגירת כל ה-FDs לפני סיום השרת.
-     */
-    for (nfds_t i = 0; i < nfds; i++) {
-        close(poll_fds[i].fd);
-    }
+    close(epoll_fd);
+    close(sockfd);
 
     return EXIT_SUCCESS;
 }
