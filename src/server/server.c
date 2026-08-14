@@ -6,10 +6,25 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <sys/epoll.h>
+#include <fcntl.h>
 
 #define PORT 8080
 #define MAX_EVENTS 100
 #define BUFFER_SIZE 1024
+
+// Set a file descriptor to non-blocking mode
+int set_nonblocking(int fd){
+   int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) {
+         perror("fcntl F_GETFL");
+         return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        perror("fcntl F_SETFL");
+        return -1;
+    }
+    return 0;
+}
 
 /*
  * מטפלת באירוע קריאה אחד של Client.
@@ -19,38 +34,64 @@
  * -1  -> צריך לסגור ולהסיר את ה-Client
  */
 
-int handle_client_event(int client_fd){
-    
+ int handle_client_event(int client_fd){
     char buffer[BUFFER_SIZE];
 
-    ssize_t bytes_received = recv( client_fd, buffer, sizeof(buffer) - 1, 0);
+    ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
-    if (bytes_received == -1){
+    if (bytes_received == -1) {
+        /*
+         * Non-blocking socket:
+         * there is currently no more data available to read.
+        */
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return 0;
+        }
+
         perror("recv");
         return -1;
     }
 
-    if (bytes_received == 0){
+    /*
+     * recv() returned 0:
+     * the client closed the connection.
+     */
+    if (bytes_received == 0) {
         printf("Client disconnected, FD %d\n", client_fd);
         return -1;
     }
 
     buffer[bytes_received] = '\0';
-
-    printf("Received %zd bytes from FD %d\n", bytes_received, client_fd);
+    printf("Received %zd bytes from FD %d\n",bytes_received, client_fd);
     printf("Message from FD %d: %s", client_fd, buffer);
 
-    const char *response = "Message received successfully\n";
+    /*
+     * Prepare server response.
+     */
+    const char *response ="Message received successfully\n";
     size_t response_length = strlen(response);
+    ssize_t bytes_sent = send(client_fd, response, response_length, 0);
 
-    ssize_t bytes_sent = send( client_fd, response, response_length, 0);
+    if (bytes_sent == -1) {
+        //The socket is currently not ready for writing.
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            printf("FD %d is not ready for writing yet\n", client_fd);
+            return 0;
+        }
 
-    if (bytes_sent == -1){
         perror("send");
         return -1;
     }
 
-    printf("Sent %zd bytes to client FD %d\n", bytes_sent, client_fd);
+    /*
+     * On a non-blocking socket send() may send
+     * fewer bytes than requested.
+     */
+    if ((size_t)bytes_sent < response_length) {
+        printf("Partial send on FD %d: sent %zd of %zu bytes\n", client_fd, bytes_sent, response_length);
+    }
+
+    printf("Sent %zd bytes to client FD %d\n", bytes_sent,client_fd);
 
     return 0;
 }
@@ -91,6 +132,12 @@ int main(void){
 
     if (sockfd == -1){
         perror("socket");
+        return 1;
+    }
+
+    // Set the socket to non-blocking mode
+    if (set_nonblocking(sockfd) == -1) {
+        close(sockfd);
         return 1;
     }
 
@@ -158,35 +205,53 @@ int main(void){
         printf("Waiting for events...\n");
 
         int ready_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
-        
+
         if (ready_count == -1) {
             if (errno == EINTR) {
-                continue; // Interrupted by signal, retry
+                continue;
             }
             perror("epoll_wait");
             break;
         }
-        
+
         for (int i = 0; i < ready_count; i++) {
             int current_fd = events[i].data.fd;
 
             if (current_fd == sockfd) {
-                struct sockaddr_in client_addr;
-                socklen_t client_addr_len = sizeof(client_addr);
+                /*
+                * Listening socket is ready.
+                * Accept every connection currently waiting.
+                */
+                while (1) {
+                    struct sockaddr_in client_addr;
+                    socklen_t client_addr_len = sizeof(client_addr);
 
-                int client_fd = accept(sockfd, (struct sockaddr *)&client_addr, &client_addr_len);
+                    int client_fd = accept(sockfd, (struct sockaddr *)&client_addr, &client_addr_len);
 
-                if (client_fd == -1) {
-                    perror("accept");
-                } else {
+                    if (client_fd == -1) {
+                        /*
+                        * Non-blocking listening socket:
+                        * no more clients are waiting.
+                        */
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            break;
+                        }
+                        perror("accept");
+                        break;
+                    }
                     printf("Client connected successfully, FD %d\n", client_fd);
+
+                    if (set_nonblocking(client_fd) == -1) {
+                        close(client_fd);
+                        continue;
+                    }
 
                     if (add_client(epoll_fd, client_fd) == -1) {
                         close(client_fd);
+                        continue;
                     }
                 }
-
-            } else {
+            }else{
                 if (events[i].events & (EPOLLERR | EPOLLHUP)) {
                     printf("Socket error/hangup on FD %d\n", current_fd);
                     remove_client(epoll_fd, current_fd);
@@ -195,7 +260,6 @@ int main(void){
 
                 if (events[i].events & EPOLLIN) {
                     int result = handle_client_event(current_fd);
-
                     if (result == -1) {
                         remove_client(epoll_fd, current_fd);
                     }
