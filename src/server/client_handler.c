@@ -44,7 +44,7 @@
 
     buffer[bytes_received] = '\0';
     printf("Received %zd bytes from FD %d\n",bytes_received, client_fd);
-    printf("Message from FD %d: %s", client_fd, buffer);
+    printf("Message from FD %d: %s\n", client_fd, buffer);
 
     /*
      * Prepare server response.
