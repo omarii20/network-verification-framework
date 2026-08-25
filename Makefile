@@ -18,7 +18,10 @@ $(SERVER_BIN): $(SERVER_SRC)
 run: $(SERVER_BIN)
 	./$(SERVER_BIN)
 
+test:
+	pytest -v tests/python/
+
 clean:
 	rm -f $(SERVER_BIN)
 
-.PHONY: all run clean
+.PHONY: all run clean test
