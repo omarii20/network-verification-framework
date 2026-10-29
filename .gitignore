@@ -22,4 +22,5 @@ __pycache__/
 # Operating system
 .DS_Store
 
+/tcp_server
 /udp_server
