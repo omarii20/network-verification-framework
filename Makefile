@@ -1,27 +1,45 @@
+
 CC = gcc
 
-CFLAGS = -Wall -Wextra -Wpedantic -Iinclude
+CFLAGS = -Wall -Wextra -Wpedantic -Iinclude/tcp
 
-SERVER_SRC = \
-	src/server/server.c \
-	src/server/socket_utils.c \
-	src/server/client_handler.c \
-	src/server/epoll_manager.c
+# TCP Server
+TCP_SRC = \
+	src/tcp/server.c \
+	src/tcp/socket_utils.c \
+	src/tcp/client_handler.c \
+	src/tcp/epoll_manager.c
 
-SERVER_BIN = server
+TCP_BIN = tcp_server
 
-all: $(SERVER_BIN)
+# UDP Server
+UDP_SRC = src/udp/udp_server.c
 
-$(SERVER_BIN): $(SERVER_SRC)
-	$(CC) $(CFLAGS) $(SERVER_SRC) -o $(SERVER_BIN)
+UDP_BIN = udp_server
 
-run: $(SERVER_BIN)
-	./$(SERVER_BIN)
+# Build both servers
+all: $(TCP_BIN) $(UDP_BIN)
 
+$(TCP_BIN): $(TCP_SRC)
+	$(CC) $(CFLAGS) $(TCP_SRC) -o $(TCP_BIN)
+
+$(UDP_BIN): $(UDP_SRC)
+	$(CC) $(CFLAGS) $(UDP_SRC) -o $(UDP_BIN)
+
+# Run TCP Server
+run: $(TCP_BIN)
+	./$(TCP_BIN)
+
+# Run UDP Server
+run-udp: $(UDP_BIN)
+	./$(UDP_BIN)
+
+# Run Python tests
 test:
 	pytest -v tests/python/
 
+# Remove binaries
 clean:
-	rm -f $(SERVER_BIN)
+	rm -f $(TCP_BIN) $(UDP_BIN)
 
-.PHONY: all run clean test
+.PHONY: all run run-udp test clean

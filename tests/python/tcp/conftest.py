@@ -67,7 +67,7 @@ def server_process():
         )
 
     # Start the server process
-    process = subprocess.Popen(["./server"])
+    process = subprocess.Popen(["./tcp_server"])
 
     wait_for_server(process, HOST, PORT)
 
